@@ -1,0 +1,68 @@
+---
+title: "holdout_test"
+author: "Qisheng Ye"
+date: "2022-12-13"
+output: html_document
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+best_model_1 <- readr::read_rds("lm_mod_yours_2_losso_2d.rds")
+best_model_2 <- readr::read_rds("gbt_1_roc.rds")
+```
+
+```{r}
+library(caret)
+library(gbm)
+library(tidyverse)
+```
+
+```{r}
+dfnew <- readr::read_csv('fall2022_holdout_inputs.csv', col_names = TRUE)
+```
+
+```{r}
+dfnew <- dfnew %>% 
+  mutate(x5 = 1 - (x1 + x2 + x3 + x4),
+         w = x2 / (x3 + x4),
+         z = (x1 + x2) / (x5 + x4),
+         t = v1 * v2) %>% 
+  glimpse()
+input <- dfnew
+```
+
+```{r}
+dfnew <- readr::read_csv('fall2022_holdout_inputs.csv', col_names = TRUE)
+```
+
+```{r}
+dfnew <- dfnew %>% 
+  mutate(x5 = 1 - (x1 + x2 + x3 + x4),
+         w = x2 / (x3 + x4),
+         z = (x1 + x2) / (x5 + x4),
+         t = v1 * v2) %>% 
+  glimpse()
+input <- dfnew
+pred_1 <- predict(best_model_1, dfnew, type = 'raw')
+```
+
+```{r}
+pred_2 <- predict(best_model_2, dfnew, type = 'prob')
+```
+
+```{r}
+result <-data.frame(y = pred_1)
+
+result <- 
+  result %>% tibble::rowid_to_column() %>%
+  cbind(output = ifelse(pred_2$event > 0.5, 'event', 'non_event')) %>%
+  cbind(probability = pred_2$event)
+
+result %>% glimpse()
+```
+
+```{r}
+result %>% readr::write_csv("results.csv")
+```

@@ -1,0 +1,411 @@
+---
+title: "Fall 2022: Final Project"
+author: "Qisheng Ye"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Overview
+
+This RMarkdown shows how to read in the final project data. It also shows how to calculate the derived input features and how to derive the categorical output from the continuous output. It also demonstrates how to fit a simple model (with `lm()`), save that model, and load it back into the workspace. You may find these actions helpful as you work through the project.  
+
+**You must download the data from Canvas and save the data in the same directory as this RMarkdown file.**  
+
+## Load packages
+
+This example uses the `tidyverse` suite of packages.  
+
+```{r, load_tidyverse}
+library(tidyverse)
+```
+
+## Read data
+
+Please download the final project data from Canvas. If this Rmarkdown file is located in the same directory as the downloaded CSV file, it will be able to load in the data for you. It is **highly** recommended that you use an RStudio RProject to more easily manage the working directory and file paths of the code and objects associated with the final project.  
+
+The code chunk below reads in the final project data.  
+
+```{r, read_final_data}
+df <- readr::read_csv("fall2022_finalproject.csv", col_names = TRUE)
+dfnew <- readr::read_csv("fall2022_holdout_inputs.csv", col_names = TRUE)
+```
+
+The `readr::read_csv()` function displays the data types and column names associated with the data. However, a glimpse is shown below that reveals the number of rows and also shows some of the representative values for the columns.  
+
+```{r, show_data_glimpse}
+df %>% glimpse()
+```
+
+The data have continuous inputs and a categorical input. The continuous inputs consist of two groups of variables, the "x-variables", `x1` through `x4`, and the "v-variables", `v1` through `v5`. The categorical input is `m`. The response is continuous and is named `output`.  
+
+
+## Simple model
+
+Let's fit a simple linear model for `output`. We will use a linear relationship with a single input, `x1`, for demonstration purposes. The model is fit using the formula interface below and assigned to the `mod01` object.  
+
+```{r, fit_mod01}
+mod01 <- lm( output ~ x1, data = df )
+```
+
+The model fitting results are summarized below with a call to the `summary()` function.  
+
+```{r, show_mod01_summary}
+mod01 %>% summary()
+```
+
+### Save model
+
+Let’s go ahead and save `mod01`. There are multiple approaches for saving objects including `.Rda` and `.rds`. I prefer to use the `.rds` object because it’s more streamlined and makes it easier to save and reload a single object, which in our case is a model object. We can use the base `R` `saveRDS()` function or the `tidyverse` equivalent `write_rds()` function from the `readr` package. I prefer to use the `tidyverse` version.
+
+The code chunk below pipes the `mod01` object into `readr::write_rds()`. It saves the object to a file in the local working directory for simplicity. Notice that the `.rds` extension is included after the desired file name.  
+
+```{r, save_mod01}
+mod01 %>% readr::write_rds("my_simple_example_model.rds")
+```
+
+If you ran the above code chunk, check your working directory with the Files tab. You should see the `my_simple_example_model.rds` in your current working directory.
+
+### Reload model
+
+Let’s now load in that model, but assign it to a different variable name. We can read in an `.rds` file with the `readr::read_rds()` function. The object is loaded in and assigned to the `re_load_mod01` object in the code chunk below.  
+
+```{r, reload_mod01}
+re_load_mod01 <- readr::read_rds("my_simple_example_model.rds")
+lm_glmmod_7 <- readr::read_rds("lm_glmmod_7.rds")
+lm_glmmod_6 <- readr::read_rds("lm_glmmod_6.rds")
+```
+
+
+We can now work with the `re_load_mod01` object just like the original model we fit, `mod01`. So we can use `summary()` and any other function on the model object, like `predict()`. To confirm let’s print out the summary below. If you compare the summary results to that printed previously you will see that the two are identical.  
+
+```{r, show_reload_summary}
+re_load_mod01 %>% summary()
+```
+
+And to confirm let's check that the model objects are the same with the `all.equal()` function.  
+
+```{r, check_mod01_equal}
+all.equal( mod01, re_load_mod01 )
+```
+
+## Derived quantities
+
+One of the goals of the final project is for you to assess if Subject Matter Expert (SME) recommended features help improve model performance relative to using the as-collected "x-" and "v-" input variables. The input derived *features* are calculated for you in the code chunk below using the `mutate()` function and a glimpse of the resulting data set is displayed to the screen. This is shown to demonstrate how to calculate these derived features from the provided input variables.  
+
+```{r, show_derived_features}
+df <- df %>% 
+  mutate(x5 = 1 - (x1 + x2 + x3 + x4),
+         w = x2 / (x3 + x4),
+         z = (x1 + x2) / (x5 + x4),
+         t = v1 * v2) %>% 
+  glimpse()
+
+input <- df
+```
+
+```{r}
+dfnew <- dfnew %>% 
+  mutate(x5 = 1 - (x1 + x2 + x3 + x4),
+         w = x2 / (x3 + x4),
+         z = (x1 + x2) / (x5 + x4),
+         t = v1 * v2) %>% 
+  glimpse()
+input <- dfnew
+```
+
+
+You are required as part of the project to explore the data. Your exploration will demonstrate that `output`, the continuous response, is between 0 and 1. Because of this, it is **highly recommended** that you transform the continuous response before training regression models. You should use the logit transformation to convert the lower and upper bounded `output` variable to an unbounded variable. The regression models should be trained to predict the logit-transformed response. The code chunk below shows how to calculate the unbounded response, `y`, as the logit transformation of the `output` variable.  
+
+```{r, show_logit_transform}
+df <- df %>% 
+  mutate(y = boot::logit(output)) %>% 
+  glimpse()
+```
+
+
+
+Although the response is continuous and you will be working with regression models in this project, you will also train binary classification models. To do so, you must derive a binary response from the continuous response, `output`. You will train classification models to classify the event of interest, which corresponds to `output < 0.33`. The binary response, `outcome`, is calculated in the code chunk below with an `ifelse()` call. The two levels are `'event'` and `non_event'`. The `outcome` column is converted to a factor variable (categorical variable) with the first level assigned to `'event'`. You are required to use this setup for the binary variable that way everyone will work with a consistent binary output.  
+
+```{r, show_binary_outcome}
+df <- df %>% 
+  mutate(outcome = ifelse(output < 0.33, 'event', 'non_event'),
+         outcome = factor(outcome, levels = c("event", "non_event"))) %>% 
+  glimpse()
+```
+
+```{r, 01}
+df <- df %>% 
+  mutate(obs_event = ifelse(outcome == 'event', 1, 0))%>% 
+  glimpse()
+```
+
+###Part iii: Classification - iiiB) Bayesian GLM
+
+```{r}
+glmmod_X7 <- model.matrix(lm_glmmod_7)
+
+info_7<- list(
+  yobs = df$obs_event,
+  design_matrix = glmmod_X7,
+  mu_beta = 0,
+  tau_beta = 4.5
+)
+
+glmmod_X6 <- model.matrix(lm_glmmod_6)
+
+info_6<- list(
+  yobs = df$obs_event,
+  design_matrix = glmmod_X6,
+  mu_beta = 0,
+  tau_beta = 4.5
+)
+
+```
+
+```{r}
+my_laplace_glm <- function(start_guess, logpost_func, ...)
+{
+  # code adapted from the `LearnBayes`` function `laplace()`
+  fit <- optim(start_guess,
+               logpost_func,
+               gr = NULL,
+               ...,
+               method = "BFGS",
+               hessian = TRUE,
+               control = list(fnscale = -1, maxit = 5001))
+  
+  mode <- fit$par
+  post_var_matrix <- -solve(fit$hessian)
+  p <- length(mode)
+  int <- p/2 * log(2 * pi) + 0.5 * log(det(post_var_matrix)) + logpost_func(mode, ...)
+  # package all of the results into a list
+  list(mode = mode,
+       var_matrix = post_var_matrix,
+       log_evidence = int,
+       converge = ifelse(fit$convergence == 0,
+                         "YES", 
+                         "NO"),
+       iter_counts = as.numeric(fit$counts[1]))
+}
+```
+
+
+```{r}
+logistic_logpost <- function(unknowns, my_info)
+{
+  # extract the design matrix and assign to X
+  X <- my_info$design_matrix
+  
+  # calculate the linear predictor
+  eta <- as.vector( X %*% as.matrix(unknowns))
+  
+  # calculate the event probability
+  mu <- boot::inv.logit(eta)
+  
+  # evaluate the log-likelihood
+  log_lik <- sum(dbinom(x = my_info$yobs,
+                        size = 1, 
+                        prob = mu,
+                        log = TRUE))
+  
+  # evaluate the log-prior
+  log_prior <- sum(dnorm(x = unknowns,
+                         mean = my_info$mu_beta,
+                         sd = my_info$tau_beta,
+                         log = TRUE))
+  
+  # sum together
+  log_lik + log_prior
+}
+```
+
+```{r}
+viz_post_coefs <- function(post_means, post_sds, xnames)
+{
+  tibble::tibble(
+    mu = post_means,
+    sd = post_sds,
+    x = xnames
+  ) %>% 
+    mutate(x = factor(x, levels = xnames)) %>% 
+    ggplot(mapping = aes(x = x)) +
+    geom_hline(yintercept = 0, color = 'grey', linetype = 'dashed') +
+    geom_point(mapping = aes(y = mu)) +
+    geom_linerange(mapping = aes(ymin = mu - 2 * sd,
+                                 ymax = mu + 2 * sd,
+                                 group = x)) +
+    labs(x = 'feature', y = 'coefficient value') +
+    coord_flip() +
+    theme_bw()
+}
+```
+ 
+
+```{r}
+df %>% glimpse()
+```
+
+
+```{r}
+laplace_glm_7 <- my_laplace_glm(rep(-1, ncol(glmmod_X7)), logistic_logpost, info_7)
+
+laplace_glm_6 <- my_laplace_glm(rep(0, ncol(glmmod_X6)), logistic_logpost, info_6)
+```
+
+```{r}
+viz_post_coefs(laplace_glm_7$mode[1:ncol(glmmod_X7)], sqrt(diag(laplace_glm_7$var_matrix)[1:ncol(glmmod_X7)]), colnames(glmmod_X7))
+```
+
+
+```{r}
+viz_post_coefs(laplace_glm_6$mode[1:ncol(glmmod_X6)], sqrt(diag(laplace_glm_6$var_matrix)[1:ncol(glmmod_X6)]), colnames(glmmod_X6))
+```
+
+
+###Part iii: Classification – iiiC) GLM Predictions
+
+```{r}
+viz_grid <- expand.grid(x1 = seq(min(df$x1), max(df$x1), length.out = 9), 
+                        x2 = seq(min(df$x2), max(df$x2), length.out = 9),
+                        x3 = seq(min(df$x3), max(df$x3), length.out = 9),
+                        m = unique(df$m),
+                        KEEP.OUT.ATTRS = FALSE,
+                        stringsAsFactors = FALSE) %>% 
+  as.data.frame() %>% tibble::as_tibble()
+
+viz_grid %>% glimpse()
+```
+
+```{r}
+generate_glm_post_samples <- function(mvn_result, num_samples)
+{
+  # specify the number of unknown beta parameters
+  length_beta <- length(mvn_result$mode)
+  
+  # generate the random samples
+  beta_samples <- MASS::mvrnorm(n = num_samples,
+                                mu = mvn_result$mode,
+                                Sigma = mvn_result$var_matrix)
+  
+  # change the data type and name
+  beta_samples %>% 
+    as.data.frame() %>% tibble::as_tibble() %>% 
+    purrr::set_names(sprintf("beta_%02d", (1:length_beta) - 1))
+}
+```
+
+
+```{r}
+post_logistic_pred_samples <- function(Xnew, Bmat)
+{
+  # calculate the linear predictor at all prediction points and posterior samples
+  eta_mat <- Xnew %*% t(Bmat)
+  
+  # calculate the event probability
+  mu_mat <- boot::inv.logit(eta_mat)
+  
+  # book keeping
+  list(eta_mat = eta_mat, mu_mat = mu_mat)
+}
+```
+
+
+```{r}
+summarize_logistic_pred_from_laplace <- function(mvn_result, Xtest, num_samples)
+{
+  # generate posterior samples of the beta parameters
+  betas <- generate_glm_post_samples(mvn_result, num_samples)
+  
+  # data type conversion
+  betas <- as.matrix(betas)
+  
+  # make posterior predictions on the test set
+  pred_test <- post_logistic_pred_samples(Xtest, betas)
+  
+  # calculate summary statistics on the posterior predicted probability
+  # summarize over the posterior samples
+  
+  # posterior mean, should you summarize along rows (rowMeans) or 
+  # summarize down columns (colMeans) ???
+  mu_avg <- rowMeans(pred_test$mu_mat)
+  
+  # posterior quantiles
+  mu_q05 <- apply(pred_test$mu_mat, 1, stats::quantile, probs = 0.05)
+  mu_q95 <- apply(pred_test$mu_mat, 1, stats::quantile, probs = 0.95)
+  
+  # book keeping
+  tibble::tibble(
+    mu_avg = mu_avg,
+    mu_q05 = mu_q05,
+    mu_q95 = mu_q95
+  ) %>% 
+    tibble::rowid_to_column("pred_id")
+}
+```
+
+```{r}
+Xviz_D <- model.matrix( ~ (x1+x2+x3)*m, data = dfnew )
+
+Xviz_G <- model.matrix( ~ (x1+x2+x3)*(x1+x2+x3)+m, data = dfnew ) 
+```
+
+```{r}
+Xmat_D <- model.matrix( ~ (x1+x2+x3)*m, data = df )
+
+Xmat_G <- model.matrix( ~ (x1+x2+x3)*(x1+x2+x3)+m, data = df )
+
+info_D <- list(
+  yobs = df$obs_event,
+  design_matrix = Xmat_D,
+  mu_beta = 0,
+  tau_beta = 4.5
+)
+info_G <- list(
+  yobs = df$obs_event,
+  design_matrix = Xmat_G,
+  mu_beta = 0,
+  tau_beta = 4.5
+)
+```
+
+
+```{r}
+laplace_D <- my_laplace_glm(rep(0, ncol(Xmat_D)), logistic_logpost, info_D)
+laplace_G <- my_laplace_glm(rep(0, ncol(Xmat_G)), logistic_logpost, info_G)
+```
+
+
+```{r}
+set.seed(8123) 
+
+post_pred_summary_D <- summarize_logistic_pred_from_laplace(laplace_D, Xviz_D, 2500)
+
+post_pred_summary_G <- summarize_logistic_pred_from_laplace(laplace_G, Xviz_G, 2500)
+```
+
+```{r}
+viz_bayes_logpost_preds <- function(post_pred_summary, input_df)
+{
+  post_pred_summary %>% 
+    left_join(dfnew %>% tibble::rowid_to_column('pred_id'),
+              by = 'pred_id') %>%
+  ggplot(mapping = aes(x = x1)) +
+  geom_ribbon(mapping = aes(ymin = mu_q05, ymax = mu_q95),
+              fill = 'orange') +
+  geom_line(mapping = aes(y = mu_avg),
+            color = 'black') +
+  facet_wrap(~m, labeller = "label_both") +
+  theme_bw()
+}
+```
+
+```{r}
+viz_bayes_logpost_preds(post_pred_summary_D, dfnew)
+```
+
+```{r}
+viz_bayes_logpost_preds(post_pred_summary_G, dfnew)
+```

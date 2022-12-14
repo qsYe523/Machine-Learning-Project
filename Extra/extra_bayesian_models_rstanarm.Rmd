@@ -1,0 +1,1084 @@
+---
+title: "Bayesian modeling - `rstanarm`"
+author: "Dr. Joseph P. Yurko"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Overview
+
+In this course, we have used the Laplace Approximation as our computational tool for executing Bayesian inference. We created full Bayesian linear models for regression and Bayesian logistic regression models for binary classification. To do so, we had to define the log-posterior function, specify the lists of required information, create functions to generate random samples, and finally create functions to make posterior predictions.  
+
+This format is not specific to this course. In fact it follows the model formulation process of the Stan programming language. Stan is a compiled probabilistic programming language specialized for creating Bayesian models. The Stan language requires the user to define the model, by coding the log-posterior function. The user must define the required information to supply to the model. Stan implements highly efficient Markov Chain Monte Carlo (MCMC) sampling schemes to perform the Bayesian inference. Thus, rather than relying on the Laplace Approximation, the MCMC sampler in Stan can handle quite complicated posterior distributions, which the Laplace Approximation struggles with.  
+
+If you would like to learn more about Stan, please the Stan extensive [case study page](https://mc-stan.org/users/documentation/case-studies.html) which provides many interesting example applications. I would especially recommend the case studies on hierarchical partial pooling for repeated binary trials ([Stan version](https://mc-stan.org/users/documentation/case-studies/pool-binary-trials.html) and the [rstanarm version](https://mc-stan.org/users/documentation/case-studies/pool-binary-trials-rstanarm.html)). Those two examples are related to your midterm question on empirical Bayes (remember that empirical Bayes is useful when there are many, many groups). APIs exist to call Stan from R, Python, and MATLAB. Thus you can interface into the state-of-the-art sampling scheme via your preferred scripting language. However, the Stan model must be written in the Stan language. RStudio has a lot of features to enable working with Stan, including understanding the basic format of a Stan model. That said, Stan has a steeper learning curve compared to scripting languages like R and Python. However, libraries have been builtup around Stan to allow working with Stan without having to program in the Stan language directly. The rstanarm and brms packages are two popular libraries that allow the user to create Stan models in `R` code. [brms](https://github.com/paul-buerkner/brms) is very flexible, and allows the user to create custom models. [rstanarm](https://mc-stan.org/rstanarm/) is more rigid, but is easier to start out with because it precompiles the Stan code for important and common model formulations. Thus, you can create linear models, generalized linear models, and other popular statistical models (such as mixed effects models) in syntax similar to `R`'s `lm()` and `glm()` functions. There are also more customized libraries for specific modeling tasks, such as Facebook's [Prophet](https://facebook.github.io/prophet/) package for time series forecasting models.  
+
+This report demonstrates how to fit full Bayesian linear models for regression using the `rstanarm` package. You will see that manipulating the results are similar to how we would summarize the posterior samples which would be generated from the `MASS::mvrnorm()` function. However, with `rstanarm` and MCMC sampling we do not make any assumptions on the posterior distribution type. This report provides links to additional readings on MCMC, Bayesian modeling, and other useful tools. You are not required to read any of those references. They are provided if you would like to learn more.  
+
+The `rstanarm` package can be downloaded and installed using the RStudio Package installation GUI tool. It may take a little bit to complete, so please do not interrupt the download process.  
+
+## Load libraries
+
+We will start out by loading in the `tidyverse`.  
+
+```{r, load_tidy}
+library(tidyverse)
+```
+
+## Create data
+
+We will make our own data for this analysis. This allows us to specify a particular functional relationship between a response and inputs, and we can see if the model fitting exercise is capable of recoverying the parameters that generated the data. This is the strategy that has been used to create the examples throughout the semester of the course.  
+
+Our example problem will consist of two "active" inputs, 1 "weakly active" input, and 2 "inactive inputs. The response will therefore depend on 2 of the variables, with a small effect from a third variable. The remaining two variables will have no impact on the response at all. Thus, we will see if the models can correctly identify the variables that influence the response.  
+
+### Trend specification
+
+Before randomly generating the data, let's first get a sense for the trend behavior through visualizations. Our true trend will consist of the following terms:  
+
+$$ 
+\mu_n = \beta_0 + \beta_1 x_{n,1} + \beta_2 x_{n,2} + \beta_3 x_{n,1}^2 + \beta_4 x_{n,2}^{2} + \beta_5 x_{n,3} + \beta_6 x_{n,1} x_{n,2}
+$$
+
+Our trend therefore consists of quadratic relationships with inputs $x_1$ and $x_2$ as well as linear relationships with interactions. The true coefficients are specified in the code chunk below. The next to last element in `beta_true` is the slope with respect to $x_3$ and is set to 0.05. Thus, increasing $x_3$ by one unit will increase the mean trend less than 0.05 units.  
+
+```{r, set_true_beta}
+beta_true <- c(0.55, 0.75, -0.7, -0.55, 0.45, 0.05, -0.9)
+```
+
+A grid of input values is defined in the cell below to focus on the $x_1$ and $x_2$ by having 51 evenly spaced points between -3 and 3, for each variable. The $x_3$ variable includes 3 unique values of -2, 0, and 2. This way we can visualize the effect $x_3$ has on the mean trend (which we know is small based on the coefficient value defined above). The `glimpse()` reveals the number of combinations in the full-factorial grid.  
+
+```{r, make_viz_grid_a}
+input_grid <- expand.grid(x1 = seq(-3, 3, length.out = 51),
+                          x2 = seq(-3, 3, length.out = 51),
+                          x3 = c(-2, 0, 2),
+                          KEEP.OUT.ATTRS = FALSE,
+                          stringsAsFactors = FALSE) %>% 
+  as.data.frame() %>% tibble::as_tibble()
+
+input_grid %>% glimpse()
+```
+
+The design matrix associated with the `input_grid` object is created using the `model.matrix()` function, as we have done throughout the semester. The formula interface is used to create the linear additive terms with the interaction between `x1` and `x2` using the `*` operator "shortcut". The quadratic terms are created using the `I()` function. The first few rows of the design matrix are displayed to the screen to show that the feature (predictor) column order is the same as the expression written earlier. Notice that the interaction term (the product between $x_1$ and $x_2$ is the last column).  
+
+```{r, viz_grid_design_matrix}
+Xgrid <- model.matrix( ~ x1 * x2 + I(x1^2) + I(x2^2) + x3, data = input_grid)
+
+Xgrid %>% head()
+```
+
+Let's now predict the true trend using our design matrix and specified true coefficient vector. The result is saved to the `true_trend_viz` vector.  
+
+```{r, calc_true_trend_viz}
+true_trend_viz <- as.vector( Xgrid %*% matrix(beta_true) )
+```
+
+The code chunk below visualizes the trend as a surface between `x1` and `x2` with facets associated with the 3 values of `x3`. The trend values are discretized into bins to help focus on the general behavior of the surface. Notice that the for the most part the three surfaces are quite similar, since the coefficient acting on `x3` is small.  
+
+```{r, viz_true_trend_surface}
+input_grid %>% 
+  mutate(mu = true_trend_viz) %>% 
+  ggplot(mapping = aes(x = x1, y = x2)) +
+  geom_raster(mapping = aes(fill = mu)) +
+  geom_contour(mapping = aes(z = mu),
+               color = "white") +
+  coord_equal() +
+  facet_wrap( ~ x3, labeller = "label_both") +
+  scale_fill_viridis_c() +
+  theme_bw() +
+  theme(legend.position = "top")
+```
+
+The surface is visualizing the behavior with respect to both $x_1$ and $x_2$. The figure below plots the trend with respect to $x_2$ with the line color denoting the value of $x_1$. A diverging color scale is used for $x_1$ to make it easier to see the behavior associated with negative values of $x_1$ compared to positive values of $x_1$.  
+
+```{r, viz_true_trend_x2}
+input_grid %>% 
+  mutate(mu = true_trend_viz) %>% 
+  ggplot(mapping = aes(x = x2, y = mu)) +
+  geom_line(mapping = aes(group = interaction(x1, x3),
+                          color = x1)) +
+  facet_wrap( ~ x3, labeller = "label_both") +
+  scale_color_gradient2(low = "darkorange", mid="grey", high="steelblue",
+                        midpoint = 0) +
+  theme_bw() +
+  theme(legend.position = "top")
+```
+
+Likewise the trend with respect to $x_1$ and colored by $x_2$ is shown in the figure below.  
+
+```{r, viz_true_trend_x1}
+input_grid %>% 
+  mutate(mu = true_trend_viz) %>% 
+  ggplot(mapping = aes(x = x1, y = mu)) +
+  geom_line(mapping = aes(group = interaction(x2, x3),
+                          color = x2)) +
+  facet_wrap( ~ x3, labeller = "label_both") +
+  scale_color_gradient2(low = "darkred", mid="grey", high="navyblue",
+                        midpoint = 0) +
+  theme_bw() +
+  theme(legend.position = "top")
+```
+
+### Generate data
+
+Let's now generate random observations since we have visualized the behavior of the trend. For simplicity we will just assume all 5 inputs are independent with mean 0. We will assume all inputs have the same standard deviation of 1.15, thus we are not assuming independent standard normals (we are assuming slightly higher standard deviation, but not by much). The inputs are randomly generated using the `MASS::mvrnorm()` function below. We will use 100 data points.  
+
+```{r, make_random_inputs}
+set.seed(87123)
+xinputs <- MASS::mvrnorm(n = 115,
+                         mu = rep(0, 5),
+                         Sigma = 1.15^2 * diag(5)) %>% 
+  as.data.frame() %>% tibble::as_tibble() %>% 
+  purrr::set_names(sprintf("x%d", 1:5))
+```
+
+
+Let's now create the design matrix associated with our random inputs. The first few rows are displayed with the `head()` function to show that the formula creates features only associated with the variables we want. Thus, `x4` and `x5` will not influence the true trend at all. That is why they are referred to as "inactive". They do not impact the response in anyway.  
+
+```{r, make_true_design_matrix_a}
+Xmat <- model.matrix( ~ x1 * x2 + I(x1^2) + I(x2^2) + x3, data = xinputs)
+
+Xmat %>% head()
+```
+
+The mean trend is calculated using our true beta coefficient values, and then random noisy observations are generated around the true trend. From our earlier visualizations, we can see that the true trend can vary from -10 to +10, so I'm selecting a noise value of $\sigma = 1.2$, which is over 5% of the trend range that we visualized. Feel free to try raising or decreasing the noise to see how that impacts to model fitting results.  
+
+```{r, generate_noisy_data}
+sigma_true <- 1.2
+
+df <- xinputs %>% 
+  mutate(mu = as.vector(Xmat %*% matrix(beta_true))) %>% 
+  mutate(y = rnorm(n = n(), mean = mu, sd = sigma_true))
+```
+
+
+### Basic exploration
+
+Because this is a synthetic data example, we know that the trend is parabolic with respect to both $x_1$ and $x_2$. We also know that the inputs are uncorrelated centered at 0. Let's now explore the data set just as we would if we were working with a real data application. The `train_df` object is created below consisting just of the inputs and the noisy response to be more representative of a real application, since the true trend is not included in the data set.  
+
+```{r, make_training_set}
+train_df <- df %>% 
+  select(starts_with("x"), y)
+
+train_df %>% glimpse()
+```
+
+The `glimpse()` function above gives us the number of observations and the variable names. Let's now look at the distribution of the response variable. Visually, the response looks normal, though there is the bin less than -10 which appears rather different from the rest of the observations (at least visually).  
+
+```{r, viz_y_hist}
+train_df %>% 
+  ggplot(mapping = aes(x = y)) +
+  geom_histogram(bins = 21) +
+  theme_bw()
+```
+
+Let's now consider the distributions of all inputs. We could make one plot at a time, but I will reshape the `train_df` object from wide to long-format. The input columns will be stacked on top of each other using the `pivot_longer()` function. By doing this, we can tell `ggplot2` to create a separate facet for each variable in the created `name` column. Visually, it appears the variables are not skewed and look roughly normal.  
+
+```{r, viz_x_hists}
+train_df %>% tibble::rowid_to_column() %>% 
+  pivot_longer(starts_with('x')) %>% 
+  ggplot(mapping = aes(x = value)) +
+  geom_histogram(mapping = aes(group = name),
+                 bins = 21) +
+  facet_wrap(~name, scales = "free") +
+  theme_bw() +
+  theme(axis.text.y = element_blank())
+```
+
+Now, let's look at the summary statistics for the columns.  
+
+```{r, show_summary_stats}
+train_df %>% summary()
+```
+
+Let's visualize the summary statistics with boxplots for each input. Notice that in the code chunk below the inputs are first "gathered" into long-format before piping the object into `ggplot()`.  
+
+```{r, viz_input_boxplots}
+train_df %>% tibble::rowid_to_column() %>% 
+  pivot_longer(starts_with('x')) %>% 
+  ggplot(mapping = aes(x = name, y = value)) +
+  geom_boxplot() +
+  labs(x = "input name", y = "input value") +
+  theme_bw()
+```
+
+By converting to long-format we can "break up" the input distributions into those associated with the response being less than it's median and those associated with the response being greater than it's median. Notice that the median comparison is made by accessing the `y` variable from `train_df` directly. That was done because the `y` variable within the long-format data has been stacked 4 times, due to stacking the 4 inputs on top of each other. The response is continuous, and so by comparing the response to its median value creates a "binary like" grouping to support visualization. As shown below, in general there seems to be differences in `x1` and `x2` associated with the response being less than its median compared to the response being greater than its median. The `x4` and `x5` inputs have similar overall boxplots.  
+
+```{r, viz_input_boxplots_b}
+train_df %>% tibble::rowid_to_column() %>% 
+  pivot_longer(starts_with('x')) %>% 
+  ggplot(mapping = aes(x = name, y = value)) +
+  geom_boxplot(mapping = aes(fill = y > median(train_df$y),
+                             color = y > median(train_df$y)),
+               alpha = 0.5) +
+  scale_fill_brewer(palette = "Set1") +
+  scale_color_brewer(palette = "Set1") +
+  labs(x = "input name", y = "input value") +
+  theme_bw() +
+  theme(legend.position = "top")
+```
+
+To understand if the "binary groups" in the response are in fact associated with different behavior with the inputs, we can study the sample average and corresponding confidence interval on the mean. We learned how to calculate this quantity earlier in the semester. However, we do not have to calculate it directly, we can tell `ggplot2` to perform the calculation for us. We just need to include the `stat_summary()` function as a layer to our graphic and set the `fun.data` argument equal to `mean_se`. I like to set the `fun.args = list(mult=2)` that way the 95% confidence interval is displayed on the sample average. The `group` aesthetic is set such that the sample average and confidence interval are calculated for each input within each "binary group". As shown below, it looks like that the average values of `x1` and `x2` are different when the response is less than its median compared to when the response is greater than its median. The average values of `x4` and `x5` however are the same. We know that this makes sense for this example because `x4` and `x5` are "inactive" and do not impact the true trend. Notice that the sample average between the groups for `x3` are slightly different. However, the confidence intervals overlap and thus we would consider the behavior "not statistically significant".  
+
+```{r, viz_input_boxplot_c}
+train_df %>% tibble::rowid_to_column() %>% 
+  pivot_longer(starts_with('x')) %>% 
+  ggplot(mapping = aes(x = name, y = value)) +
+  geom_boxplot(mapping = aes(fill = y > median(train_df$y),
+                             color = y > median(train_df$y)),
+               alpha = 0.5) +
+  stat_summary(fun.data = "mean_se",
+               mapping = aes(group = interaction(name, 
+                                                 y > median(train_df$y))),
+               fun.args = list(mult = 2),
+               position = position_dodge(0.75)) +
+  scale_fill_brewer(palette = "Set1") +
+  scale_color_brewer(palette = "Set1") +
+  labs(x = "input name", y = "input value") +
+  theme_bw() +
+  theme(legend.position = "top")
+```
+
+The above figure suggests that the the first two inputs influence the continuous response. Let's now look at scatter plots between the inputs and the response. The data set is again reshaped so that way we can use separate facets for each input.  
+
+```{r, viz_scatter_response}
+train_df %>% tibble::rowid_to_column() %>% 
+  pivot_longer(starts_with('x')) %>% 
+  ggplot(mapping = aes(x = value, y = y)) +
+  geom_point(alpha = 0.5) +
+  facet_wrap( ~ name, scales = "free_x") +
+  theme_bw()
+```
+
+The above figure should hopefully confirm what we saw in the boxplots. To help visualize the trends easier let's include two `geom_smooth()` layers. One will display a linear trend as a blue line and the second will allow a non-linear smoother as an orange line. THe non-linear smoother is identifying some non-linear trend with respect to `x1`. The linear trend confirms the sample average difference we saw with the box plot figure. However, the non-linear smoother appears to be essentially the same as the linear trend with respect to `x2`. Since we created the data for this problem, we know there is a quadratic relationship between the response and `x2`. However, the smoother is only considering the response with respect to a single input in each facet. Thus, the smoother cannot identify the non-linear relationshp with `x2` since it does not anything about the other inputs or features.  
+
+```{r, viz_scatter_smooth}
+train_df %>% tibble::rowid_to_column() %>% 
+  pivot_longer(starts_with('x')) %>% 
+  ggplot(mapping = aes(x = value, y = y)) +
+  geom_point(alpha = 0.5) +
+  geom_smooth(formula = y ~ x,
+              method = "lm", color = "steelblue", fill = "steelblue", alpha = 0.5) +
+  geom_smooth(formula = y ~ x,
+              color = "darkorange", fill = "darkorange", alpha = 0.5) +
+  facet_wrap( ~ name, scales = "free_x") +
+  theme_bw()
+```
+
+Let's see if we can manually account for the influence of `x1` when visualizing the behavior with respect to `x2`. The scatter plot below uses the wide format `train_df` and plots the response with respect to `x2`. The markers are colored based on `x1`.  
+
+```{r, viz_scatter_y_x2}
+train_df %>% 
+  ggplot(mapping = aes(x = x2, y = y)) +
+  geom_point(mapping = aes(color = x1),
+             size = 4, alpha = 0.5) +
+  scale_color_viridis_c() +
+  theme_bw()
+```
+
+Let's now apply two smoothers, one associated with the observations with `x1` less than it's median and another for those observations with `x1` greater than it's median. We can perform the conditional test on the `x1` variable directly (we do not need to use the `$` operator to access it within a tibble or data.frame) because the wide-format data set was piped directly into `ggplot()`. As shown below, the value of `x1` appears to impact the trend with respect to `x2`. We will ultimately train models to investigate if that is indeed true!  
+
+```{r, viz_scatter_y_x2_b}
+train_df %>% 
+  ggplot(mapping = aes(x = x2, y = y)) +
+  geom_point(mapping = aes(color = x1 > median(x1)),
+             size = 4, alpha = 0.5) +
+  geom_smooth(formula = y ~ x,
+              mapping = aes(group = x1 > median(x1),
+                            color = x1 > median(x1)),
+              size = 1.15) +
+  scale_color_viridis_d() +
+  theme_bw() +
+  theme(legend.position = "top")
+```
+
+Lastly, let's investigate if the inputs are correlated. Again, we know they are not because we generated the data, but in a real application we would need to check this. Below, I use the `corrplot()` function from the `corrplot` package to visualize the correlation matrix. I am focusing on the inputs, and so the response `y` is removed. As shown below, the correlation coefficients between the input pairs are all near zero.  
+
+```{r, viz_corrplot}
+train_df %>% 
+  select(-y) %>% 
+  cor() %>% 
+  corrplot::corrplot(method = "number", type = "upper")
+```
+
+Since this is a small data set, we could also consider a pairs plot or plot-matrix which shows scatter plots between all pairs of inputs. Pairs plots can be really useful, but are more difficult to assess visually when we have a large number of inputs. I like to use the `ggpairs()` function from the `GGally` package to create the pairs plot. If you do not have `GGally` please download and install before running the code chunk below. By default the upper half of the plot matrix shows the correlation coefficient between the pair of variables, while the scatter plot is shown below the main diagonal. The main diagonal displays the density estimate for each variable.  
+
+```{r, viz_pairs_plot, warning=FALSE, message=FALSE}
+train_df %>% 
+  select(-y) %>% 
+  GGally::ggpairs(progress = FALSE) + 
+  theme_bw()
+```
+
+`GGally::ggpairs()` allows mapping aesthetics just like `ggplot2`. So we could also color the markers based on if `y` is greater than its median, to see if the correlation structure is different based on the response "binary group". Notice that the correlation coefficient between `x1` and `x2` has different signs based on the response "binary group".  
+
+```{r, viz_pairs_plot_groups, warning=FALSE, message=FALSE}
+train_df %>% 
+  GGally::ggpairs(progress = FALSE,
+                  columns = names(xinputs),
+                  mapping = aes(color = y > median(y))) +
+  theme_bw()
+```
+
+## Models
+
+With the exploration complete, it's time to start fitting models. As stated earlier, we will work with full Bayesian linear models. The motivation, concepts, and goals of the Bayesian models are the same as what we discussed in lecture and you worked on in your homework assignments. However, we will fit the models with the `rstanarm` package rather than using our custom approach. `rstanarm` uses an advanced sampling scheme to draw samples from the posterior distribution. Thus, working with the results will be analogous to working with the posterior samples generated from the `generate_post_*_samples()` functions that you worked with in your assignments. If you would like to learn more about Markov Chain Monte Carlo (MCMC) please see [this website](https://chi-feng.github.io/mcmc-demo/) which includes animations of various sampling algorithms, from simple (Random Walk Metropolis) to the advanced Hamiltonian Monte Carlo (HMC) and No-U-Turn Sampler (NUTS) used in the Stan programming language. If you would like to learn more about Stan please see the Stan case studies listed above, as well as the introductory vignettes provided on the `rstan` [CRAN page](https://cran.r-project.org/web/packages/rstan/index.html).  
+
+Within this report we will treat the `rstanarm::stan_lm()` function as returning an object similar in concept to the posterior samples that were generated in the homework assignments.  
+
+### First model
+
+Let's start out by fitting a model with the exact formulation that generated the data. This way we can check if our modeling strategy is able to recover the parameters that generated the data. The code chunk below loads in the `rstanarm` library. If you do not have `rstanarm` downloaded and installed please do so before running the code chunk below.  
+
+```{r, load_rstanarm}
+library(rstanarm)
+```
+
+#### Fitting
+
+We will fit a linear model using the `rstanarm::stan_lm()` function which provides an interface similar to the `lm()` function. Even though we can specify our model using the formula interface, it is important to remember we are still performing Bayesian inference. Thus, we must still specify a prior on all unknowns. `stan_lm()` can help with this because it offers an approach for specifying the prior on all coefficients via a prior specified on R-squared. If you are interested, please see the `stan_lm` [vignette](https://cran.r-project.org/web/packages/rstanarm/vignettes/lm.html) for more discussion around this interesting prior formulation.  
+
+Let's fit our Bayesian linear model using all default settings, however we must specify our prior belief on R-squared. Let's assume a-priori we think R-squared is 0.5, which roughly corresponds to not supplying much prior information to the problem. The random seed is also set to ensure reproducibility. Running the code chunk below will display the sampling results (listed as iterations) to the screen. The sampling is divided into two halves. The first half, the "warmup" phase helps the sampler explore the distribution from an initial starting guess. The "warmup" samples are discarded. The second half, the "sampling" phase, are samples retained that we will use in our analysis. By default four separate sampling sequences are used. These separate sequences are referred to as "chains". By default 1000 samples are retained per chain, and thus 4000 posterior samples are made. The four chains are run sequentially, but you can instruct the chains to be run in parallel by setting `options(mc.cores = parallel::detectCores())` (as stated by the initial `rstanarm` loading message). If your machine has less than 6 GB RAM, I'd recommend using just 2 cores, `options(mc.cores = 2)`. All models are fit sequentially in this report.  
+
+```{r, fit_lm_a}
+mod_a <- stan_lm(y ~ x1 * x2 + I(x1^2) + I(x2^2) + x3, data = train_df,
+                 prior = R2(location = 0.5),
+                 seed = 432123)
+```
+
+As efficient as the Stan HMC sampler is, it is important to remember that no learning algorithm (optimization or sampling based) is perfect. There are situations where the sampler will struggle. `rstanarm` will display warnings for when the sampler has had issues and the vignettes (such as [this one](https://cran.r-project.org/web/packages/rstanarm/vignettes/rstanarm.html)) discuss options to overcome those issues. However, for this simple model, the sampler worked well and has no issues. Hence why no warning messages were displayed to the screen.  
+
+We can summarize the posterior results with the `summary()` function, just like we could with `lm()`. The result format is different however, because we are summarizing a full Bayesian linear model! The summary includes posterior summary statistics on the unknown parameters, such as the posterior mean, standard deviation (sd), and the 10th, 50th, and 90th posterior quantiles. Thus, we can see below that the slope on `x1` has an 80% posterior probability of being between 0.8 and 1.0. The summary report also displays MCMC sampler diagnostics, the Monte Carlo standard error on the mean, the Rhat factor, and the effective sample size. We ideally want the Monte Carlo standard error to be near zero, Rhat as close to 1.0 as possible and the effective sample size to be high (around the number of posterior samples). As shown in the summary report below, the sampler performed very well for this example.  
+
+```{r, summarize_first_model}
+mod_a %>% summary()
+```
+
+We can extract posterior intervals directly using the `posterior_interval()` function. By default the middle 90% posterior uncertainty interval is calculated and displayed for all learned parameters.  
+
+```{r, show_90_unc_interval}
+posterior_interval(mod_a)
+```
+
+Remember that we specified the prior in terms of R-squared, thus the `R2` parameter is the R-squared for the model. The middle 90% uncertainty interval on R-squared therefore tells us that R-squared is between 75% and 84% with 90% posterior probability. If we did not want to use the R-squared prior formulation (such as using the more general `stan_glm()` function), we can calculate the posterior samples on R-squared using `rstanarm::bayes_R2()`. Let's confirm the R-squared behavior by calculating the 5th, 50th, and 95th quantiles. Our prior specification was such that the most probable value for R-squared a-priori was 50%. The data however has changed our prior belief, since the lower 5th quantile of R-squared is 75%!  
+
+```{r, check_bayes_R2}
+rstanarm::bayes_R2(mod_a) %>% quantile(c(0.05, 0.5, 0.95))
+```
+
+#### Posterior visualizations
+
+We can visualize the posterior summary statistics using the default plot method associated with a `rstanarm` model. The plot is analogous to the `coefplot::coefplot()` function that we have used to visualize the confidence intervals on the `lm()` coefficients.  
+
+```{r, viz_post_summary_a}
+plot(mod_a)
+```
+
+The above plot is actually created by `ggplot2` though it might not look like it. We can change the plot, such as using a different them just like we would with any ggplot graphic object. Below, I use the `theme_bw()` function to use the theme I prefer, which includes the axis grid lines.  
+
+```{r, viz_post_summary_a_b}
+plot(mod_a) + theme_bw()
+```
+
+By default, all unknowns are displayed in the plot. We can use the `pars` argument to identify specific parameters we wish to plot. For example to show just the posterior summary statistics on `x1`, `x2`, and `x3`:  
+
+```{r, viz_post_summary_a_xs}
+plot(mod_a, pars = c("x1", "x2", "x3")) + theme_bw()
+```
+
+We can use the `pars` argument to then easily plot all coefficients by accessing the coefficient names as shown in the code chunk below. A vertical line to denote a coefficient value of 0 is included as reference.  
+
+```{r, viz_post_summary_a_coefs}
+plot(mod_a, pars = names(mod_a$coefficients)) + 
+  geom_vline(xintercept = 0, color = "grey", linetype = "dashed", size = 1.) +
+  theme_bw()
+```
+
+The `mod_a` object stores the posterior samples for all learned parameters. We can extract those samples and work with them directly using the `as.data.frame()` function. The code chunk below extracts the posterior samples, converts the object to a tibble, then selects just the coefficient names, and pipes the result to `glimpse()`.  
+
+```{r, extract_post_samples_df}
+as.data.frame(mod_a) %>% tibble::as_tibble() %>% 
+  select(all_of(names(mod_a$coefficients))) %>% 
+  glimpse()
+```
+
+At this point it's similar to working with the posterior samples object from lecture and the homework assignments. The code chunk below takes the posterior samples reshapes to long-format and plots a histogram for each parameter as a facet in `ggplot2`. As shown below, all coefficient posterior distributions look like Gaussians.  
+
+```{r, viz_post_hist_a}
+as.data.frame(mod_a) %>% tibble::as_tibble() %>% 
+  select(all_of(names(mod_a$coefficients))) %>% 
+  tibble::rowid_to_column("post_id") %>% 
+  pivot_longer(!c("post_id")) %>% 
+  ggplot(mapping = aes(x = value)) +
+  geom_histogram(bins = 55) +
+  facet_wrap(~name, scales = "free") +
+  theme_bw() +
+  theme(axis.text.y = element_blank())
+```
+
+The code chunk below includes the true values associated with each parameter as a red vertical line. We can see that the quadratic coefficient's posterior modes. Although the posterior is confident that the sign on `x1` is positive and the sign on the interaction term is negative, you can see those are the coefficients with the true values away from the posterior modes. The parameter recovery is therefore not perfect, which we should have anticipated given that the median R-squared is 80%. Why is the R-squared not 99% even though this is the exact model formulation that generated the data?  
+
+```{r, viz_post_hist_a_compare}
+as.data.frame(mod_a) %>% tibble::as_tibble() %>% 
+  select(all_of(names(mod_a$coefficients))) %>% 
+  tibble::rowid_to_column("post_id") %>% 
+  pivot_longer(!c("post_id")) %>% 
+  ggplot(mapping = aes(x = value)) +
+  geom_histogram(bins = 55) +
+  geom_vline(data = tibble::tibble(true_value = beta_true,
+                                   name = names(mod_a$coefficients)),
+             mapping = aes(xintercept = true_value),
+             color = "red", linetype = "dashed", size = 1.) +
+  facet_wrap(~name, scales = "free") +
+  theme_bw() +
+  theme(axis.text.y = element_blank())
+```
+
+We can study the posterior correlation between the parameters by piping the coefficient posterior samples into the `corrplot` package. As shown below, the largest absolute correlation is between the quadratic coefficients and the intercept.  
+
+```{r, viz_post_coef_corr}
+as.data.frame(mod_a) %>% tibble::as_tibble() %>% 
+  select(all_of(names(mod_a$coefficients))) %>% 
+  cor() %>% 
+  corrplot::corrplot(method = "number", type = "upper")
+```
+
+Let's next consider the posterior distribution on the noise or residual error, which is named `sigma` just as in the homework assignments. The code chunk below summarizes the posterior samples on `sigma` by calculating the 5th, median, and 95th quantiles.  
+
+```{r, show_sigma_quantiles}
+as.data.frame(mod_a) %>% tibble::as_tibble() %>% 
+  select(sigma) %>% 
+  pull() %>% 
+  quantile(c(0.05, 0.5, 0.95))
+```
+
+The posterior distribution on `sigma` is visualized below with the true noise value displayed as a vertical red dashed line. We can see that the posterior mode underestimates the true noise value of `r sigma_true`. However, the true noise is contained in the middle 90% posterior uncertainty interval.  
+
+```{r, viz_post_sigma_hist}
+as.data.frame(mod_a) %>% tibble::as_tibble() %>% 
+  ggplot(mapping = aes(x = sigma)) +
+  geom_histogram(bins = 55) +
+  geom_vline(xintercept = sigma_true, 
+             color = "red", linetype = "dashed", size = 1.1) +
+  theme_bw()
+```
+
+Let's get a sense of how the non-Bayesian maximum likelihood estimate to the noise relates to the posterior distribution. The code chunk below fits the same model but using the base `R` `lm()` function. The `summary()` is displayed for comparison purposes to our full Bayesian linear model. We can see the behavior of the coefficients is consistent with our Bayesian model in that `x3` is the only feature considered to not be important.  
+
+```{r, fit_lm_model_a}
+fit_lm_a <- lm(y ~ x1 * x2 + I(x1^2) + I(x2^2) + x3, data = train_df)
+
+fit_lm_a %>% summary()
+```
+
+The summary displays the noise as the residual standard error. We can extract the noise a few ways, including using the `broom::glance()` function that was introduced earlier in the semester. The code chunk below uses the `stats::sigma()` function (the `stats` package comes with base `R` so no need to install it, you already have it) to extract the noise and display it as a vertical orange line over the posterior noise histogram. As shown below, the maximum likelihood estimate (MLE) on the noise coincides with the posterior mode. Our prior formulation used a relatively weak prior on the unknowns through the R-squared prior setup. Thus, the 
+
+```{r, viz_sigma_hist_compare_mle}
+as.data.frame(mod_a) %>% tibble::as_tibble() %>% 
+  ggplot(mapping = aes(x = sigma)) +
+  geom_histogram(bins = 55) +
+  geom_vline(xintercept = sigma_true, 
+             color = "red", linetype = "dashed", size = 1.1) +
+  geom_vline(xintercept = stats::sigma(fit_lm_a),
+             color = "darkorange", linetype = "dashed", size = 1.1) +
+  theme_bw()
+```
+
+
+#### Additional visualizations
+
+The `bayesplot` package provides functions to easily create many different types of visualizations to help explore posterior distributions and predictions. Some of those visualizations are similar to the ones we have used in class to explore the posterior. Please see the [bayesplot getting started page](https://mc-stan.org/bayesplot/) if you would like to learn more.  
+
+#### Other priors
+
+As mentioned in lecture, it is a good idea to try out other prior assumptions to examine how sensitive the posterior results are to our assumptions. Those other priors will not be tried in this report, but feel free to try using the prior mode on R-squared of 0.8 and again with a value of 0.2. Why do you think those are useful conditions to examine when fitting the models with the `stan_lm()` function?  
+
+#### Posterior predictions
+
+In your assignments, we needed to define our own function to make predictions from our models. We discussed how the predictions can be summarized and we mostly focused on the uncertainty of the mean trend. When fitting models with `rstanarm` models we can use the provided functions to make predictions, which streamlines the work flow. Two sets of prediction functions exist to represent the two types of uncertainty we discussed in lecture. The first is `posterior_linpred()` which makes posterior predictions of the linear predictor. In the case of linear models, the linear predictor is equal to the mean trend, and thus provides the posterior samples of the trend due to the uncertainty in the coefficients. The second function, `posterior_predict()` accounts for the noise and so provides posterior samples of the response around the mean.  
+
+Let's study the posterior predictions on a simplified grid compared to the grid that we visualized the true trend. This will make it easier to visualize the uncertainty in the predictions with ribbons. Let's focus on the trend with respect to `x2` and so we will have more points in `x2` than the other input variables. For simplicity, let's just consider a single value for `x3` since we learned it does not impact the trend from the model. Lastly, the grid will include the `x4` and `x5` but at constant values of 0, even though those variables are not used in the model we fit.  
+
+```{r, make_viz_grid}
+viz_grid <- expand.grid(x1 = c(-2, 0, 2),
+                        x2 = seq(-2.75, 2.75, length.out = 25),
+                        x3 = c(0),
+                        x4 = 0, 
+                        x5 = 0,
+                        KEEP.OUT.ATTRS = FALSE,
+                        stringsAsFactors = FALSE) %>% 
+  as.data.frame() %>% tibble::as_tibble()
+
+viz_grid %>% glimpse()
+```
+
+We can make predictions with the `posterior_linpred()` function similar to how make predictions with a standard `lm()` model. The first argument to `posterior_linpred()` is the model object. The data set we wish to make predictions on is the `newdata` argument. The formula interface used to define the model will look into the provided data set and create the test design matrix for us (thus the necessary features will be automatically created, we do not have to make them up front). The code chunk below makes predictions and then displays the dimensionality of the returned object. As shown by the output displayed below, the object has 4000 rows and 75 columns. Each row corresponds to a posterior sample and each column corresponds to a prediction point. The `glimpse()` function in the previous code chunk displayed that there are 75 prediction points in the `vid_grid` data set.  
+
+```{r, check_pred_dims}
+posterior_linpred(mod_a, newdata = viz_grid) %>% dim()
+```
+
+You had to summarize the posterior predictions in your homework assignments. We will do the same in this report, except the summary stats will be calculated using functions `dplyr`. The code chunk below reshapes the predictions into a long format, by stacking the predictions on top of each other. The long-format data set is then grouped by the prediction point to summarize over the posterior samples. The `viz_grid` data set is merged in to support visualizing the posterior predictive summary stats with `ggplot2`. The posterior predictive uncertainty is represented by ribbons displaying the posterior 90% uncertainty interval on the mean trend. In lecture we referred to this as the *confidence interval* on the mean.  
+
+```{r, viz_mean_trend_unc_a}
+posterior_linpred(mod_a, newdata = viz_grid) %>% 
+  as.data.frame() %>% tibble::as_tibble() %>% 
+  tibble::rowid_to_column("post_id") %>% 
+  pivot_longer(!c("post_id"), names_to = 'pred_id') %>% 
+  mutate(across(.cols = 'pred_id', .fns = as.numeric)) %>% 
+  group_by(pred_id) %>% 
+  summarise(num_post = n(),
+            trend_avg = mean(value),
+            trend_lwr = quantile(value, 0.05),
+            trend_upr = quantile(value, 0.95)) %>% 
+  ungroup() %>% 
+  left_join(viz_grid %>% tibble::rowid_to_column("pred_id"),
+            by = "pred_id") %>% 
+  ggplot(mapping = aes(x = x2)) +
+  geom_ribbon(mapping = aes(ymin = trend_lwr,
+                            ymax = trend_upr,
+                            group = x1,
+                            fill = as.factor(x1)),
+              alpha = 0.5) +
+  geom_line(mapping = aes(y = trend_avg,
+                          group = x1,
+                          color = as.factor(x1)),
+            size = 1.) +
+  facet_wrap(~x3, labeller = "label_both") +
+  scale_fill_viridis_d("x1") +
+  scale_color_viridis_d("x1") +
+  labs(y = "mean trend") +
+  theme_bw() +
+  theme(legend.position = "top")
+```
+
+Posterior predictions of the response are made with the `posterior_predict()` function. The format is similar to the `posterior_linpred()` function, except as mentioned earlier the predictions are of the response and thus account for the noise, $\sigma$, around the mean trend. The code chunk below summarizes the posterior predictions of the response and displays the 90% uncertainty interval around the mean with ribbons. In lecture we referred to this uncertainty interval as the *prediction interval*.  
+
+```{r, viz_pred_unc_a}
+posterior_predict(mod_a, newdata = viz_grid) %>% 
+  as.data.frame() %>% tibble::as_tibble() %>% 
+  tibble::rowid_to_column("post_id") %>% 
+  pivot_longer(!c("post_id"), names_to = 'pred_id') %>% 
+  mutate(across(.cols = 'pred_id', .fns = as.numeric)) %>% 
+  group_by(pred_id) %>% 
+  summarise(num_post = n(),
+            y_avg = mean(value),
+            y_lwr = quantile(value, 0.05),
+            y_upr = quantile(value, 0.95)) %>% 
+  ungroup() %>% 
+  left_join(viz_grid %>% tibble::rowid_to_column("pred_id"),
+            by = "pred_id") %>% 
+  ggplot(mapping = aes(x = x2)) +
+  geom_ribbon(mapping = aes(ymin = y_lwr,
+                            ymax = y_upr,
+                            group = x1,
+                            fill = as.factor(x1)),
+              alpha = 0.5) +
+  geom_line(mapping = aes(y = y_avg,
+                          group = x1,
+                          color = as.factor(x1)),
+            size = 1.) +
+  facet_wrap(~x3, labeller = "label_both") +
+  scale_fill_viridis_d("x1") +
+  scale_color_viridis_d("x1") +
+  labs(y = "y") +
+  theme_bw() +
+  theme(legend.position = "top")
+```
+
+The prediction intervals are wider than the confidence intervals because the confidence intervals only represent the uncertainty on the average behavior. To help make that point easier to see, the code chunk below merges the linear predictor posterior summaries with the response prediction posterior summary stats. The intervals are displays as grey for the confidence interval and orange for the prediction interval. The facet corresponds to the value of `x1`.  
+
+```{r, viz_conf_and_pred_int_a}
+posterior_predict(mod_a, newdata = viz_grid) %>% 
+  as.data.frame() %>% tibble::as_tibble() %>% 
+  tibble::rowid_to_column("post_id") %>% 
+  pivot_longer(!c("post_id"), names_to = 'pred_id') %>% 
+  mutate(across(.cols = 'pred_id', .fns = as.numeric)) %>% 
+  group_by(pred_id) %>% 
+  summarise(y_avg = mean(value),
+            y_lwr = quantile(value, 0.05),
+            y_upr = quantile(value, 0.95)) %>% 
+  ungroup() %>% 
+  left_join(posterior_linpred(mod_a, newdata = viz_grid) %>% 
+              as.data.frame() %>% tibble::as_tibble() %>% 
+              tibble::rowid_to_column("post_id") %>% 
+              pivot_longer(!c("post_id"), names_to = 'pred_id') %>% 
+              mutate(across(.cols = 'pred_id', .fns = as.numeric)) %>% 
+              group_by(pred_id) %>% 
+              summarise(trend_avg = mean(value),
+                        trend_lwr = quantile(value, 0.05),
+                        trend_upr = quantile(value, 0.95)) %>% 
+              ungroup(),
+            by = "pred_id") %>% 
+  left_join(viz_grid %>% tibble::rowid_to_column("pred_id"),
+            by = "pred_id") %>% 
+  ggplot(mapping = aes(x = x2)) +
+  geom_ribbon(mapping = aes(ymin = y_lwr, ymax = y_upr,
+                            group = x1), 
+              fill = "darkorange") +
+  geom_ribbon(mapping = aes(ymin = trend_lwr, ymax = trend_upr,
+                            group = x1),
+              fill = "grey") +
+  geom_line(mapping = aes(y = trend_avg,
+                          group = x1),
+            color = "black", size = 0.85) +
+  facet_wrap(~x1 + x3, labeller = "label_both") +
+  labs(y = "y") +
+  theme_bw()
+```
+
+We saw that most of the parameters are learned quite well. Let's overlay the true trend with the posterior predictions. We first need to create the design matrix associated with the `viz_grid` object, since we have to calculate the true trend ourselves. The true trend is shown below as a dashed red curve. Notice how the true trend is closer to the posterior mean of the trend (the black curves) when the inputs are closer to their mean values (0's for this problem). Input values greater than the absolute value of 2 are not predicted as closely since there are fewer observations of these more extreme values.  
+
+```{r, viz_conf_and_pred_int_compare}
+
+Xviz_mat <- model.matrix( ~ x1 * x2 + I(x1^2) + I(x2^2) + x3, data = viz_grid)
+
+posterior_predict(mod_a, newdata = viz_grid) %>% 
+  as.data.frame() %>% tibble::as_tibble() %>% 
+  tibble::rowid_to_column("post_id") %>% 
+  pivot_longer(!c("post_id"), names_to = 'pred_id') %>% 
+  mutate(across(.cols = 'pred_id', .fns = as.numeric)) %>% 
+  group_by(pred_id) %>% 
+  summarise(y_avg = mean(value),
+            y_lwr = quantile(value, 0.05),
+            y_upr = quantile(value, 0.95)) %>% 
+  ungroup() %>% 
+  left_join(posterior_linpred(mod_a, newdata = viz_grid) %>% 
+              as.data.frame() %>% tibble::as_tibble() %>% 
+              tibble::rowid_to_column("post_id") %>% 
+              pivot_longer(!c("post_id"), names_to = 'pred_id') %>% 
+              mutate(across(.cols = 'pred_id', .fns = as.numeric)) %>% 
+              group_by(pred_id) %>% 
+              summarise(trend_avg = mean(value),
+                        trend_lwr = quantile(value, 0.05),
+                        trend_upr = quantile(value, 0.95)) %>% 
+              ungroup(),
+            by = "pred_id") %>% 
+  left_join(viz_grid %>% tibble::rowid_to_column("pred_id"),
+            by = "pred_id") %>% 
+  ggplot(mapping = aes(x = x2)) +
+  geom_ribbon(mapping = aes(ymin = y_lwr, ymax = y_upr,
+                            group = x1), 
+              fill = "darkorange") +
+  geom_ribbon(mapping = aes(ymin = trend_lwr, ymax = trend_upr,
+                            group = x1),
+              fill = "grey") +
+  geom_line(mapping = aes(y = trend_avg,
+                          group = x1),
+            color = "black", size = 0.85) +
+  geom_line(data = viz_grid %>% 
+              mutate(mu_true = as.vector(Xviz_mat %*% matrix(beta_true))),
+            mapping = aes(x = x2, y = mu_true, group = x1),
+            color = "red", size = 0.9, linetype = "dashed") +
+  facet_wrap(~x1 + x3, labeller = "label_both") +
+  labs(y = "y") +
+  theme_bw()
+```
+
+
+We can answer all kinds of probabilistic questions when considering the posterior predictive distribution. For example, perhaps we were interested in understanding the behavior of positive vs negative responses. We can calculate the posterior predicted probability that the response is greater than 0, as a function of the inputs. Visually, we can get a sense of this behavior by looking at the prediction interval in the figure above (just remember we the ribbon is between the 5th and 95th quantiles). The code chunk below summarizes the posterior predictions by calculating the probability that the predicted response is greater than 0 with respect to `x2` for the 3 values of `x1` considered in the prediction grid. Notice that the behavior of probability looks like the behavior of logistic regression!  
+
+```{r, viz_prob_grt_0}
+posterior_predict(mod_a, newdata = viz_grid) %>% 
+  as.data.frame() %>% tibble::as_tibble() %>% 
+  tibble::rowid_to_column("post_id") %>% 
+  pivot_longer(!c("post_id"), names_to = 'pred_id') %>% 
+  mutate(across(.cols = 'pred_id', .fns = as.numeric)) %>% 
+  group_by(pred_id) %>% 
+  summarise(num_post = n(),
+            y_avg = mean(value),
+            y_lwr = quantile(value, 0.05),
+            y_upr = quantile(value, 0.95),
+            prob_grt_0 = mean(value > 0)) %>% 
+  ungroup() %>% 
+  left_join(viz_grid %>% tibble::rowid_to_column("pred_id"),
+            by = "pred_id") %>% 
+  ggplot(mapping = aes(x = x2, y = prob_grt_0)) +
+  geom_line(mapping = aes(group = x1,
+                          color = as.factor(x1)),
+            size = 1.) +
+  facet_wrap(~x3, labeller = "label_both") +
+  scale_fill_viridis_d("x1") +
+  scale_color_viridis_d("x1") +
+  labs(y = "Probability y is greater than 0") +
+  theme_bw() +
+  theme(legend.position = "top")
+```
+
+### More models
+
+We fit our first model using the exact model formulation that generated the data. This was a useful exercise to see how well the parameters could be learned relative to their true values. However, in a real application we will not know the true formulation to use. There are many options to consider, including using more advanced methods besides linear models!  
+
+Let's now consider a more realistic application in that we have some data, `train_df`, it consists of the 5 inputs, `x1` through `x5`, and a continuous response, `y`. We will try out a series of models from simple to more complex and ultimately select the best performing model from those candidates. We will therefore pretend we did not know that the `x4` and `x5` inputs do not matter. We may have seen from the exploratory data analysis that the last two inputs appear to not have an effect, but we will still consider them in the models as potential predictors.  
+
+#### Linear additive terms
+
+Let's first consider a model with linear additive terms with all inputs. We will continue to use the formula interface and so we do not need to create a separate design matrix. Since the `train_df` object only contains the inputs and the response, the formula `y ~ .` is a short cut for linear additive terms for all other variables in the data set. You can check that is indeed the case using the `model.matrix()` function, if you would like. We will also continue to use the R-squared based prior specification with the prior mode set to be 0.5.  
+
+```{r, fit_linear_additive_model}
+mod_1 <- stan_lm(y ~ ., data = train_df,
+                 prior = R2(location = 0.5),
+                 seed = 432123)
+```
+
+The summary for the simple model with linear additive terms is shown below. We can see the sampling diagnostics are good, and that this model has a slope associated with each input (since it's a linear additive model). We can also see that the posterior mean on R-squared is 0.4.  
+
+```{r, show_mod_1_summary}
+mod_1 %>% summary()
+```
+
+The posterior summary statistics for the coefficients are visualized below. The plot graphically displays what we could have expected based on the posterior summary table above. Only the first two inputs have significant trends with the trends. This finding is in agreement with our exploratory data analysis visualizations from earlier in the report.  
+
+```{r, viz_mod_1_post_stats}
+plot(mod_1, pars = names(mod_1$coefficients)) +
+  geom_vline(xintercept = 0, color = "grey", linetype = "dashed", size = 1.0) +
+  theme_bw()
+```
+
+#### All pair-wise interactions
+
+A model with all pair-wise interactions between the 5 inputs would consist of 16 features (including the intercept). The `model.matrix()` function is used to show that is indeed the case.  
+
+```{r, check_num_cols_pairwise}
+model.matrix(y ~ (.)^2, train_df) %>% dim()
+```
+
+Fitting a model with all pair wise interactions is rather simple with `rstanarm`, we simply need to modify our formula.  
+
+```{r, fit_pairwise_interactions}
+mod_2 <- stan_lm(y ~ (.)^2, data = train_df,
+                 prior = R2(location = 0.5),
+                 seed = 432123)
+```
+
+The model fitting summary is displayed below. Again the sampling diagnostics look good.  
+
+```{r, show_mod_2_summary}
+mod_2 %>% summary()
+```
+
+The posterior summary stats on the parameters are visualized below. This model is picking up several interaction terms as being important.  
+
+```{r, viz_mod_2_post_stats}
+plot(mod_2, pars = names(mod_2$coefficients)) +
+  geom_vline(xintercept = 0, color = "grey", linetype = "dashed", size = 1.0) +
+  theme_bw()
+```
+
+#### Quadratic terms
+
+Let's now try a model with quadratic terms. The quadratic terms will not interact with other predictors, but we will continue to use all pair-wise interactions between the linear terms.  
+
+```{r, fit_mod_3}
+mod_3 <- stan_lm(y ~ (.)^2 + I(x1^2) + I(x2^2) + I(x3^2) + I(x4^2) + I(x5^2), 
+                 data = train_df,
+                 prior = R2(location = 0.5),
+                 seed = 432123)
+```
+
+The summary below again shows that the sampler did not have any issues. The posterior mean on R-squared is now 0.8 with the quadratic terms included.  
+
+```{r, check_mod_3_summary}
+mod_3 %>% summary()
+```
+
+The posterior summary stats are visualized for the coefficients below. The quadratic terms associated with inputs 1 and 2 are considered to be important. Interestingly, the model is associating some behavior with features involving `x5`.  
+
+```{r, viz_mod_3_post_stats}
+plot(mod_3, pars = names(mod_3$coefficients)) +
+  geom_vline(xintercept = 0, color = "grey", linetype = "dashed", size = 1.0) +
+  theme_bw()
+```
+
+#### Splines with interactions
+
+Let's now consider a rather complex model that involving interactions between natural splines applied to `x1`, `x2`, and `x5`, as well as additive natural splines for `x3` and `x4`. As shown by the `model.matrix()` call in the code chunk below, this model has 31 features (including the intercept). We know that this is an overly complex model for this application because we defined the true relationship at the start of the report. This formulation is consistent with tensor product splines which are available in the `mgcv` package. The `mgcv` package is a useful package for fitting, interpreting, and making predictions with generalized additive models (GAMs). You may consider using such models if interpretation is critical important to your application.  
+
+```{r}
+model.matrix( y ~ (splines::ns(x1, 2) * splines::ns(x2, 2) * splines::ns(x5, 2)) + 
+                     splines::ns(x3, 2) + splines::ns(x4, 2), 
+              train_df) %>% dim()
+```
+
+Although this formulation has many features, it is straight forward to setup with the formula interface with `stan_lm()`. Even though there are many interacting spline basis features, the model is still a linear model! Fitting it however is not as fast as our previous models. This is a good example for why running the chains in parallel can greatly accelerate the model fitting process.  
+
+```{r, fit_mod_4_complex}
+mod_4 <- stan_lm(y ~ (splines::ns(x1, 2) * splines::ns(x2, 2) * splines::ns(x5, 2)) + 
+                     splines::ns(x3, 2) + splines::ns(x4, 2), 
+                 data = train_df,
+                 prior = R2(location = 0.5),
+                 seed = 432123)
+```
+
+The posterior summary for the more complex model is displayed below. The sampling diagnostics look good, even though the sampling took longer than before. Notice though that this more complex model has posterior mean on R-squared of 0.7, which is lower than our previous model.  
+
+```{r, check_post_summary_mod_4}
+mod_4 %>% summary()
+```
+
+#### Higher order polynomials
+
+Let's now consider a model with interactions between 3rd order polynomials in `x1` and `x2`. The remaining three inputs will include all pair-wise interactions. This is a quite complex response surface model with cubic terms. If you would like to learn more about response surfaces, especially their design for optimizing systems, please see the excellent `rsm` library. The `rsm` CRAN page is [linked here](https://cran.r-project.org/web/packages/rsm/index.html). As a check, the code chunk below shows that there are 22 features in the design matrix.  
+
+```{r, check_mod_5_dims}
+model.matrix( y ~ (poly(x1, 3, raw=TRUE) * poly(x2, 3, raw=TRUE)) + (x3 + x4 + x5)^2, 
+              train_df) %>% dim()
+```
+
+The model is fit below.  
+
+```{r, fit_mod_5}
+mod_5 <- stan_lm(y ~ (poly(x1, 3, raw=TRUE) * poly(x2, 3, raw=TRUE)) + (x3 + x4 + x5)^2, 
+                 data = train_df,
+                 prior = R2(location = 0.5),
+                 seed = 432123)
+```
+
+The posterior summary reveals the sampling diagnostics are all good, with the posterior mean on R-squared equal to 0.8.  
+
+```{r}
+mod_5 %>% summary()
+```
+
+What if we considered cubic polynomials for all 5 inputs? We will continue to allow the cubic polynomials associated with the first two inputs to interact. As shown below, this model has 25 features.  
+
+```{r, check_full_cubic_model}
+model.matrix( y ~ (poly(x1, 3, raw=TRUE) * poly(x2, 3, raw=TRUE)) + 
+                (poly(x3, 3, raw=TRUE) + poly(x4, 3, raw=TRUE) + poly(x5, 3, raw=TRUE)), 
+              train_df) %>% dim()
+```
+
+And now let's fit the "full" cubic model.  
+
+```{r, fit_mod_6}
+mod_6 <- stan_lm(y ~ (poly(x1, 3, raw=TRUE) * poly(x2, 3, raw=TRUE)) + 
+                   (poly(x3, 3, raw=TRUE) + poly(x4, 3, raw=TRUE) + poly(x5, 3, raw=TRUE)), 
+                 data = train_df,
+                 prior = R2(location = 0.5),
+                 seed = 432123)
+```
+
+The summary again reveals the sampling does not have any issues, and the R-squared posterior mean is 0.8.  
+
+```{r, show_mod_6_summary}
+mod_6 %>% summary()
+```
+
+## Model selection
+
+We have trained 6 different models, in addition to the one that uses the correct model formulation. In a real application, how could we decide which model is the best? We have discussed multiple ways of evaluating the performance of regression models throughout the semester. This section reviews those methods from a full Bayesian perspective.  
+
+### Training set performance
+
+Let's first consider the behavior on the training set. We have been looking at the R-squared summaries throughout the model fitting process, but let's visualize the R-squared posterior distributions now. The code chunk below uses `purrr::map2_dfr()` to extract the posterior R-squared samples and then displays the histogram for each model. As we saw with the posterior summaries displayed earlier, models 3, 5, and 6 have the highest posterior values, followed by model 4. The simplest model, the linear additive model is definitely worse, at least according to the training set.  
+
+```{r, viz_rsquared_post}
+purrr::map2_dfr(list(mod_1, mod_2, mod_3, mod_4, mod_5, mod_6),
+                as.character(1:6),
+                function(mod, mod_name){tibble::tibble(rsquared = bayes_R2(mod)) %>% 
+                    mutate(model_name = mod_name)}) %>% 
+  ggplot(mapping = aes(x = rsquared)) +
+  geom_freqpoly(bins = 55,
+                 mapping = aes(color = model_name),
+                 size = 1.1) +
+  coord_cartesian(xlim = c(0, 1)) +
+  ggthemes::scale_color_colorblind("Model") +
+  theme_bw()
+```
+
+The noise, $\sigma$, is the residual error of the model's mean trend. The code chunk below displays the posterior distributions on the noise for all five models. In this application, the behavior of the $\sigma$ posteriors follows that of the posterior distribution on R-squared.  
+
+```{r, viz_all_sigma_post}
+purrr::map2_dfr(list(mod_1, mod_2, mod_3, mod_4, mod_5, mod_6),
+                as.character(1:6),
+                function(mod, mod_name){as.data.frame(mod) %>% tibble::as_tibble() %>% 
+                    select(sigma) %>% 
+                    mutate(model_name = mod_name)}) %>% 
+  ggplot(mapping = aes(x = sigma)) +
+  geom_freqpoly(bins = 55,
+                 mapping = aes(color = model_name),
+                 size = 1.1) +
+  ggthemes::scale_color_colorblind("Model") +
+  theme_bw()
+```
+
+### Information criterion
+
+We discussed how the Laplace Approximation provides an estimate to the log-Evidence (log-marginal likelihood). The log-Evidence penalizes the performance of complex models essentially based on the number of parameters, as shown by the BIC (which approximates the Laplace Approximation's approximation). Unfortunately, we cannot use the log-Evidence based approach when we use MCMC sampling. However, we can use other information criterion that operate in the same way. The Widely Applicable Information Criterion (WAIC) is an approach that makes no assumptions about the posterior distribution. It calculates the performance of the model and penalizes that performance based on effective number of parameters. The penalty fully accounts for the joint posterior distribution of the parameters and the effect on the predictive behavior. We will not discuss how the WAIC is calculated in this report. For now, it is enough to think of it as an information criterion approach with fewer assumptions than the approach we used based on the Laplace Approximation.  
+
+The code chunk below calculates the WAIC for each of the 6 models and assigns the result as a new field in the model object. This will the facilitate the comparison method in the next step of the process. The warning messages displayed below recommend an approach that is described in the next section.  
+
+```{r, calculate_model_waic}
+mod_1$waic <- waic(mod_1)
+mod_2$waic <- waic(mod_2)
+mod_3$waic <- waic(mod_3)
+mod_4$waic <- waic(mod_4)
+mod_5$waic <- waic(mod_5)
+mod_6$waic <- waic(mod_6)
+```
+
+The model objects are assigned as elements in the `stanreg_list()` function in the code chunk below. The `model_names` argument allows specified more informative names associated with each model.  
+
+```{r, setup_model_list}
+my_models <- stanreg_list(mod_1, mod_2, mod_3, mod_4, mod_5, mod_6,
+                          model_names = c("Linear additive", "Pairwise Interactions",
+                                          "Quadratic terms", "Interacting splines",
+                                          "cubic with interactions",
+                                          "cubic for all 5 inputs"))
+```
+
+We can now directly compare the five models based on their information criterion. The results are ordered automatically from the best to the worst models based on the WAIC metric. The cubic model with interactions (`mod_5`) and the quadratic model (`mod_3`) are considered the two best models out of the 6. The comparisons are made based on two quantities. The first `elpd_diff` is related to the difference in difference in the WAIC values. The worse a model is relative to the best the more negative this quantity will be. The second value to consider is `se_diff`, the standard error on the difference. If `elpd_diff` is within the `se_diff` that means there is little meaningful difference between the models. For example the top two models are considered very similar since the standard error on the difference is greater than the difference itself (rounding does not display a difference, which by default is printed to 1 decimal point). However, look at the `elpd_diff` and `se_diff` associated with the cubic model with all 5 inputs (`mod_6`). The standard error on the difference is 1.7 while the difference itself is -2.2. The difference is greater than the standard error, and thus we can have confidence that the model behavior is different. The models without non-linear features have differences much greater than the standard error on the difference representing those models are definitely worse than the best performing model.  
+
+```{r, compare_waic}
+loo_compare(my_models, criterion = "waic")
+```
+
+### LOO
+
+We briefly discussed leave-one-out (LOO) cross-validation (CV) earlier in the semester during the "applied machine learning" portion of the course. We did not discuss it during the deep dive on the linear and generalized linear model derivations, when we focused on the likelihood and posterior distributions. With the Laplace Approximation as our inference engine, we focused on the information criterion based approaches for model selection.  
+
+However, Bayesian models can also benefit from cross-validation. Holding out data points helps identify which data points the posterior distribution is particular sensitive to, and thus serves as a form of sensitivity analysis. This is especially true if leave-one-out cross-validation is used. We can identify the specific data points that cause the largest change in the posterior. We did not perform this analysis this semester, but you could try it out if you would like. It just requires you to repeat the Laplace Approximation as many times as there are data points.  
+
+When we use MCMC sampling, a "brute force" approach to LOO is not advisable. The process would simply take too long, especially for large models and thousands of observations. Luckily, LOOCV can be approximated through Importance Sampling. Just how this works is beyond the scope of this course. Thus, we simply make use of the approach in this report without going into the details.  
+
+The approximate LOOCV is performed on the linear additive model below.   
+
+```{r, run_loo_1}
+loo_1 <- loo(mod_1)
+```
+
+A warning message is displayed to the screen which represents that the posterior is quite sensitive to a few of the observations. We can visualize just which observations those are with the default plot method to the loo model object. As shown below, the 35th data point seems to influence the posterior quite a bit. Removing this data point yields different posterior distributions relative to the posterior associated with all data points.  
+
+```{r, check_loo_1}
+plot(loo_1, label_points = TRUE)
+```
+
+Let's follow the warning message and set the `k_threshold` value to 0.7 in the call to the `loo()` function. Doing so will refit the model (re-perform the sampling) with the 35th data point removed. Thus, the posterior distribution will be explicitly determined when the problematic point is removed, providing a more exact LOOCV estimate.  
+
+```{r, rerun_loo_1}
+loo_1_b <- loo(mod_1, k_threshold = 0.7)
+```
+
+If we execute the `loo()` function on the second model, we also see that the warning message appears. However, there are 2 observations which are considered problematic.  
+
+```{r, run_loo_2}
+loo_2 <- loo(mod_2)
+```
+
+The LOOCV diagnostic plot reveals that the posterior is also sensitive to data point 32, in addition to data point 35. Following the warning message will therefore require the fitting to be re-performed 2 times. Since the model is quite fast to fit, let's go ahead and allow the MCMC sampling to be repeated by holding out each data point.  
+
+```{r, check_loo_2}
+plot(loo_2, label_points = TRUE)
+```
+
+```{r, rerun_loo_2}
+loo_2_b <- loo(mod_2, k_threshold = 0.7)
+```
+
+The LOOCV metric is calculated for the remaining 4 models below. Each model has different number of data points the posteriors are sensitive to, which requires the MCMC sampling to be re-performed. Thus, the LOOCV metric is more computationally expensive to evaluate compared to the WAIC metric which only considers the training set. However, the fourth model is not refit based on the sensitive data points. This was done to limit the computational requirements of rendering the report, because refitting the fourth model multiple times is rather time consuming.  
+
+```{r, run_loo_3}
+loo_3 <- loo(mod_3)
+```
+
+```{r, rerun_loo_3}
+loo_3_b <- loo(mod_3, k_threshold = 0.7)
+```
+
+Again, the MCMC sampling is not re-performed for the fourth model, simply to limit the computational requirements of rendering this report. A complete analysis would require refitting. If we would, the fitting can be performed in parallel to save time.  
+
+```{r, run_loo_4}
+loo_4 <- loo(mod_4)
+```
+
+```{r, run_loo_5}
+loo_5 <- loo(mod_5)
+```
+
+```{r, rerun_loo_5}
+loo_5_b <- loo(mod_5, k_threshold = 0.7)
+```
+
+```{r, run_loo_6}
+loo_6 <- loo(mod_6)
+```
+
+```{r, rerun_loo_6}
+loo_6_b <- loo(mod_6, k_threshold = 0.7)
+```
+
+We can now compare the 6 models based on the LOOCV metric. Let's first compare the models using the original approximate LOOCV metric which can be impacted by the sensitive observations. The `loo_compare()` function is used again, but we pass in each of the loo objects. The results are displayed in similar fashion as to the WAIC comparisons, with the best performing model listed first. The `elpd_diff` tells us the difference in performance between a model from the best performing model. The `se_diff` let's us know if that difference is within the standard error or not. If the difference is within the standard error then the model it is difficult to distinguish the differences between the two models.  
+
+```{r, compare_loo_a}
+loo_compare(loo_1, loo_2, loo_3, loo_4, loo_5, loo_6)
+```
+
+Based on the results displayed above, `mod_3` and `mod_5` have essentially the same performance. This is consistent with the WAIC results we saw earlier. However, it is difficult to distinguish if `mod_6` is worse than `mod_3` since the `se_diff` value is greater than the `elpd_diff` value for the row associated with `mod_6` in the output above. The approximate LOOCV metric, which does not require refitting the model, is sensitive to various observations. Thus, let's now rank the models based on the more accurate LOOCV metrics which did refit the models (except `mod_4`):  
+
+```{r, compare_loo_b}
+loo_compare(loo_1_b, loo_2_b, loo_3_b, loo_4, loo_5_b, loo_6_b)
+```
+
+As shown above, using the more accurate calculations reveal that `mod_3` is considered to be the best. None of the other models have `elpd_diff` values within their corresponding `se_diff`. In fact, the more complex `mod_6` has an `elpd_diff` nearly twice it's standard error, representing we can be quite confident that `mod_3` is better than `mod_6`.  
+
+### Model weights
+
+The LOOCV metric, as with the information criterion based approaches, have comparisons that are not in the units of the response. Thus, the results are a little tricky to interpret outside of the definite ranking that can be performed. In lecture, we discussed how we can estimate a "model weight" which represents the probability of one model relative to the others considered. The `loo_model_weights()` function will calculate the model weights for us, based on the LOOCV metric. It has the same interpretation as the posterior model weight quantity we discussed in class. The weights are based on the LOOCV metric rather than the log-Evidence calculation from the Laplace Approximation.  
+
+Let's now calculate the model weights for our 6 models. We can pass in the model objects directly to `loo_model_weights()` and the function will calculate the LOOCV metrics. It will even refit the models if there are sensitive observations, if we would like. Thus, the `loo_model_weights()` function can be rather computationally expensive if we are not careful. I prefer to pass in the already calculated LOOCV metric results as a list, to have greater control over the execution. There are several methods for calculating the model weights. We will use the default method known as stacking.  
+
+```{r, calc_loo_mod_weights}
+loo_model_weights(list(`1` = loo_1_b, `2` = loo_2_b, 
+                       `3` = loo_3_b, `4` = loo_4, 
+                       `5` = loo_5_b, `6` = loo_6_b))
+```
+
+```{r, echo=FALSE}
+waic_model_weights_results <- loo_model_weights(list(`1` = loo_1_b, `2` = loo_2_b, 
+                                                     `3` = loo_3_b, `4` = loo_4, 
+                                                     `5` = loo_5_b, `6` = loo_6_b))
+```
+
+
+
+As shown in the output displayed above `mod_3` has a weight of about `r round(100*as.numeric(waic_model_weights_results)[3])`%, followed by `mod_5` with a weight of about `r round(100*as.numeric(waic_model_weights_results)[5])`%. The third model includes the quadratic terms and interactions, and is a subset of `mod_5` which includes the cubic terms. The other models are therefore either too simple, and underfit the data, or are too complex and represent overfitting the data.  
+
+### Relative behavior
+
+It is important to remember that the model selection rankings and especially the model weights are based on the specific candidate set of models being considered. The best model, `mod_3`, contains the features associated with the true model formulation. However, it also includes features associated with the "inactive inputs" `x4` and `x5`. This was done to represent a realistic application where we do not know which variables are not important ahead of time.  
+
+Let's see what happens to the model selection rankings if we would consider the true formulation, `mod_a`. The LOOCV metric is calculated for `mod_a` below.  
+
+```{r, calc_loo_a}
+loo_a <- loo(mod_a)
+```
+
+The approximate LOOCV metric was sensitive to a single observation. As shown below, observation 35 is the culprit again.  
+
+```{r, check_loo_a}
+plot(loo_a, label_points = TRUE)
+```
+
+Let's refit the model by removing observation 35, and thus calculating the more exact leave-one-out metric.  
+
+```{r, rerun_loo_a}
+loo_a_b <- loo(mod_a, k_threshold = 0.7)
+```
+
+And now we can rank all of the models we have considered. As shown below, `mod_a` which is the correct formulation and has fewer features than `mod_3` is considered the best model. The `elpd_diff` is greater than more than 3 standard errors, and thus we can be very confidence `mod_a` is the best model to use.  
+
+```{r, rank_with_correct}
+loo_compare(loo_1_b, loo_2_b, loo_3_b, loo_4, loo_5_b, loo_6_b, loo_a_b)
+```
+
+Including the correct formulation completely changes the model weights. The correct formulation, `mod_a`, has a weight of over 98%. All other models that we tried are considered to be essentially meaningless, relative to `mod_a`. Interestingly, the simplest model with linear additive terms has a small weight of 0.016 or 1.6%. This may represent that the more complex models which have features similar to the correct formulation do not "add" value relative to the behavior of the correct formulation.  
+
+```{r, weights_with_correct}
+loo_model_weights(list(`1` = loo_1_b, `2` = loo_2_b, 
+                       `3` = loo_3_b, `4` = loo_4, 
+                       `5` = loo_5_b, `6` = loo_6_b,
+                       a = loo_a_b))
+```
+

@@ -1,0 +1,52 @@
+model1 - lm_mod_base_1
+model2 - lm_mod_base_2
+model3 - lm_mod_base_3
+
+model4 - lm_mod_expanded_1
+model5 - lm_mod_expanded_2
+model6 - lm_mod_expanded_3
+
+model7 - lm_mod_yours_1
+model8 - lm_mod_yours_2
+model9 - lm_mod_yours_3
+
+X08 - X_yours_2
+X09 - X_yours_3
+
+info_08 - info_yours_2
+info_09 - info_yours_3
+
+laplace_08 - laplace_yours_2
+laplace_09 - laplace_yours_3
+
+model_base - model_base_2d
+model_extact - model_extact_2d
+
+model_8 - lm_mod_yours_2_2d
+model_9 - lm_mod_yours_3_2d
+
+model_8_losso - lm_mod_yours_2_losso_2d
+model_9_losso - lm_mod_yours_3_losso_2d
+
+glm_model1 - lm_glmmod_1
+glm_model2 - lm_glmmod_2
+glm_model3 - lm_glmmod_3
+
+glm_model4 - lm_glmmod_4
+glm_model5 - lm_glmmod_5
+glm_model6 - lm_glmmod_6
+
+glm_model7 - lm_glmmod_7
+glm_model8 - lm_glmmod_8
+glm_model9 - lm_glmmod_9
+
+
+
+
+
+
+
+
+
+
+
